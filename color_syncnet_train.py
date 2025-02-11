@@ -15,7 +15,11 @@ from glob import glob
 
 import os, random, cv2, argparse
 from hparams import hparams, get_image_list
-
+from dotenv import load_dotenv
+load_dotenv()
+wandb_api_key = os.getenv('WANDB_API_KEY')
+import wandb
+wandb.login(key=wandb_api_key, host='http://10.10.185.1:8080')
 parser = argparse.ArgumentParser(description='Code to train the expert lip-sync discriminator')
 
 parser.add_argument("--data_root", help="Root folder of the preprocessed LRS2 dataset", required=True)
@@ -25,6 +29,7 @@ parser.add_argument('--checkpoint_path', help='Resumed from this checkpoint', de
 
 args = parser.parse_args()
 
+wandb.init(project=hparams.project_name, config=hparams, name=hparams.model_name + '_' + hparams.experiment_id)
 
 global_step = 0
 global_epoch = 0
@@ -173,7 +178,7 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
             if global_step % hparams.syncnet_eval_interval == 0:
                 with torch.no_grad():
                     eval_model(test_data_loader, global_step, device, model, checkpoint_dir)
-
+            wandb.log({'train/loss': running_loss / (step + 1)}, step=global_step)
             prog_bar.set_description('Loss: {}'.format(running_loss / (step + 1)))
 
         global_epoch += 1
@@ -202,7 +207,7 @@ def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
 
         averaged_loss = sum(losses) / len(losses)
         print(averaged_loss)
-
+        wandb.log({'eval/loss': averaged_loss}, step=global_step)
         return
 
 def save_checkpoint(model, optimizer, step, checkpoint_dir, epoch):

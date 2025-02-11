@@ -30,6 +30,9 @@ class HParams:
 
 # Default hyperparameters
 hparams = HParams(
+	project_name="Wav2Lip",
+	model_name='Wav2Lip',
+	experiment_id='default',
 	num_mels=80,  # Number of mel-spectrogram channels and local conditioning dimensionality
 	#  network
 	rescale=True,  # Whether to rescale audio prior to preprocessing
