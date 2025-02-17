@@ -28,8 +28,10 @@ parser.add_argument('--checkpoint_dir', help='Save checkpoints to this directory
 parser.add_argument('--checkpoint_path', help='Resumed from this checkpoint', default=None, type=str)
 
 args = parser.parse_args()
-
-wandb.init(project=hparams.project_name, config=hparams, name=hparams.model_name + '_' + hparams.experiment_id)
+if args.checkpoint_path is not None:
+    wandb.init(entity='lingz0124', project=hparams.project_name, id='ksaqh6rn', resume="must")
+else:
+    wandb.init(project=hparams.project_name, config=hparams, name=hparams.model_name + '_' + hparams.experiment_id)
 
 global_step = 0
 global_epoch = 0
