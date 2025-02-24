@@ -17,6 +17,11 @@ from glob import glob
 
 import os, random, cv2, argparse
 from hparams import hparams, get_image_list
+from dotenv import load_dotenv
+load_dotenv()
+wandb_api_key = os.getenv('WANDB_API_KEY')
+import wandb
+wandb.login(key=wandb_api_key, host='http://10.10.185.1:8080')
 
 parser = argparse.ArgumentParser(description='Code to train the Wav2Lip model WITH the visual quality discriminator')
 
@@ -27,10 +32,11 @@ parser.add_argument('--syncnet_checkpoint_path', help='Load the pre-trained Expe
 
 parser.add_argument('--checkpoint_path', help='Resume generator from this checkpoint', default=None, type=str)
 parser.add_argument('--disc_checkpoint_path', help='Resume quality disc from this checkpoint', default=None, type=str)
-
+parser.add_argument('--config_file', help='config yaml file', default=None, type=str)
 args = parser.parse_args()
-
-
+if args.config_file is not None:
+    hparams.load_config(args.config_file) # override hyperparameters with config file
+wandb.init(project=hparams.project_name, config=hparams, name=hparams.model_name + '_' + hparams.experiment_id)
 global_step = 0
 global_epoch = 0
 use_cuda = torch.cuda.is_available()
@@ -38,6 +44,7 @@ print('use_cuda: {}'.format(use_cuda))
 
 syncnet_T = 5
 syncnet_mel_step_size = 16
+best_eval_loss = 1e3 
 
 class Dataset(object):
     def __init__(self, split):
@@ -176,6 +183,8 @@ def save_sample_images(x, g, gt, global_step, checkpoint_dir):
     collage = np.concatenate((refs, inps, g, gt), axis=-2)
     for batch_idx, c in enumerate(collage):
         for t in range(len(c)):
+            rgb_img = cv2.cvtColor(c[t], cv2.COLOR_BGR2RGB)
+            wandb.log({'sample_images': [wandb.Image(rgb_img, caption='batch_idx: {}, t: {}'.format(batch_idx, t))]}, step=global_step)
             cv2.imwrite('{}/{}_{}.jpg'.format(folder, batch_idx, t), c[t])
 
 logloss = nn.BCELoss()
@@ -208,6 +217,7 @@ def train(device, model, disc, train_data_loader, test_data_loader, optimizer, d
         print('Starting Epoch: {}'.format(global_epoch))
         running_sync_loss, running_l1_loss, disc_loss, running_perceptual_loss = 0., 0., 0., 0.
         running_disc_real_loss, running_disc_fake_loss = 0., 0.
+        all_running_loss = 0.0 
         prog_bar = tqdm(enumerate(train_data_loader))
         for step, (x, indiv_mels, mel, gt) in prog_bar:
             disc.train()
@@ -241,7 +251,7 @@ def train(device, model, disc, train_data_loader, test_data_loader, optimizer, d
 
             loss.backward()
             optimizer.step()
-
+            all_running_loss += loss.item() 
             ### Remove all gradients before Training disc
             disc_optimizer.zero_grad()
 
@@ -284,11 +294,22 @@ def train(device, model, disc, train_data_loader, test_data_loader, optimizer, d
 
             if global_step % hparams.eval_interval == 0:
                 with torch.no_grad():
-                    average_sync_loss = eval_model(test_data_loader, global_step, device, model, disc)
+                    average_sync_loss, eval_loss = eval_model(test_data_loader, global_step, device, model, disc)
 
                     if average_sync_loss < .75:
                         hparams.set_hparam('syncnet_wt', 0.03)
-
+                    if eval_loss < best_eval_loss:
+                        best_eval_loss = eval_loss
+                        save_checkpoint(model, optimizer, global_step, checkpoint_dir, global_epoch, prefix='best_')
+            wandb.log({'train/syncnet_wt': hparams.syncnet_wt, 
+                       'train/disc_wt': hparams.disc_wt,
+                       'train/best_eval_loss': best_eval_loss}, step=global_step)
+            wandb.log({'train/l1_loss': running_l1_loss / (step + 1),
+                        'train/sync_loss': running_sync_loss / (step + 1),
+                        'train/perceptual_loss': running_perceptual_loss / (step + 1),
+                        'train/disc_real_loss': running_disc_real_loss / (step + 1),
+                        'train/disc_fake_loss': running_disc_fake_loss / (step + 1),
+                        'train/loss': all_running_loss / (step + 1)}, step=global_step)
             prog_bar.set_description('L1: {}, Sync: {}, Percep: {} | Fake: {}, Real: {}'.format(running_l1_loss / (step + 1),
                                                                                         running_sync_loss / (step + 1),
                                                                                         running_perceptual_loss / (step + 1),
@@ -301,6 +322,7 @@ def eval_model(test_data_loader, global_step, device, model, disc):
     eval_steps = 300
     print('Evaluating for {} steps'.format(eval_steps))
     running_sync_loss, running_l1_loss, running_disc_real_loss, running_disc_fake_loss, running_perceptual_loss = [], [], [], [], []
+    running_all_loss = [] 
     while 1:
         for step, (x, indiv_mels, mel, gt) in enumerate((test_data_loader)):
             model.eval()
@@ -332,7 +354,7 @@ def eval_model(test_data_loader, global_step, device, model, disc):
 
             loss = hparams.syncnet_wt * sync_loss + hparams.disc_wt * perceptual_loss + \
                                     (1. - hparams.syncnet_wt - hparams.disc_wt) * l1loss
-
+            running_all_loss.append(loss.item())
             running_l1_loss.append(l1loss.item())
             running_sync_loss.append(sync_loss.item())
             
@@ -342,13 +364,18 @@ def eval_model(test_data_loader, global_step, device, model, disc):
                 running_perceptual_loss.append(0.)
 
             if step > eval_steps: break
-
+        wandb.log({'eval/l1_loss': sum(running_l1_loss) / len(running_l1_loss),
+                    'eval/sync_loss': sum(running_sync_loss) / len(running_sync_loss),
+                    'eval/perceptual_loss': sum(running_perceptual_loss) / len(running_perceptual_loss),
+                    'eval/disc_real_loss': sum(running_disc_real_loss) / len(running_disc_real_loss),
+                    'eval/disc_fake_loss': sum(running_disc_fake_loss) / len(running_disc_fake_loss),
+                    'eval/loss': sum(running_all_loss) / len(running_all_loss)}, step=global_step)
         print('L1: {}, Sync: {}, Percep: {} | Fake: {}, Real: {}'.format(sum(running_l1_loss) / len(running_l1_loss),
                                                             sum(running_sync_loss) / len(running_sync_loss),
                                                             sum(running_perceptual_loss) / len(running_perceptual_loss),
                                                             sum(running_disc_fake_loss) / len(running_disc_fake_loss),
                                                              sum(running_disc_real_loss) / len(running_disc_real_loss)))
-        return sum(running_sync_loss) / len(running_sync_loss)
+        return sum(running_sync_loss) / len(running_sync_loss), sum(running_all_loss) / len(running_all_loss)
 
 
 def save_checkpoint(model, optimizer, step, checkpoint_dir, epoch, prefix=''):
@@ -396,7 +423,10 @@ def load_checkpoint(path, model, optimizer, reset_optimizer=False, overwrite_glo
 
 if __name__ == "__main__":
     checkpoint_dir = args.checkpoint_dir
-
+    if not os.path.exists(checkpoint_dir): os.mkdir(checkpoint_dir)
+    # save config into yaml
+    config_file = os.path.join(checkpoint_dir, 'hparams.yaml')
+    hparams.save_to_yaml(config_file)
     # Dataset and Dataloader setup
     train_dataset = Dataset('train')
     test_dataset = Dataset('val')

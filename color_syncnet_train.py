@@ -26,8 +26,13 @@ parser.add_argument("--data_root", help="Root folder of the preprocessed LRS2 da
 
 parser.add_argument('--checkpoint_dir', help='Save checkpoints to this directory', required=True, type=str)
 parser.add_argument('--checkpoint_path', help='Resumed from this checkpoint', default=None, type=str)
+parser.add_argument('--config_file', help='config yaml file',default=None, type=str)
+
 
 args = parser.parse_args()
+if args.config_file is not None:
+    hparams.load_config(args.config_file) # override hyperparameters with config file
+
 if args.checkpoint_path is not None:
     wandb.init(entity='lingz0124', project=hparams.project_name, id='ksaqh6rn', resume="must")
 else:
@@ -40,6 +45,7 @@ print('use_cuda: {}'.format(use_cuda))
 
 syncnet_T = 5
 syncnet_mel_step_size = 16
+best_eval_loss = 1e3 
 
 class Dataset(object):
     def __init__(self, split):
@@ -179,7 +185,12 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
 
             if global_step % hparams.syncnet_eval_interval == 0:
                 with torch.no_grad():
-                    eval_model(test_data_loader, global_step, device, model, checkpoint_dir)
+                    eval_loss = eval_model(test_data_loader, global_step, device, model, checkpoint_dir)
+                    if eval_loss < best_eval_loss:
+                        best_eval_loss = eval_loss
+                        save_checkpoint(
+                            model, optimizer, global_step, checkpoint_dir, global_epoch, prefix='best_')
+            wandb.log({'train/best_eval_loss': best_eval_loss}, step=global_step)
             wandb.log({'train/loss': running_loss / (step + 1)}, step=global_step)
             prog_bar.set_description('Loss: {}'.format(running_loss / (step + 1)))
 
@@ -210,12 +221,12 @@ def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
         averaged_loss = sum(losses) / len(losses)
         print(averaged_loss)
         wandb.log({'eval/loss': averaged_loss}, step=global_step)
-        return
+        return averaged_loss
 
-def save_checkpoint(model, optimizer, step, checkpoint_dir, epoch):
+def save_checkpoint(model, optimizer, step, checkpoint_dir, epoch, prefix=''):
 
     checkpoint_path = join(
-        checkpoint_dir, "checkpoint_step{:09d}.pth".format(global_step))
+        checkpoint_dir, "{}checkpoint_step{:09d}.pth".format(prefix, global_step))
     optimizer_state = optimizer.state_dict() if hparams.save_optimizer_state else None
     torch.save({
         "state_dict": model.state_dict(),
@@ -255,7 +266,9 @@ if __name__ == "__main__":
     checkpoint_path = args.checkpoint_path
 
     if not os.path.exists(checkpoint_dir): os.mkdir(checkpoint_dir)
-
+    # save yaml configuration file 
+    config_file = os.path.join(checkpoint_dir, 'hparams.yaml')
+    hparams.save_to_yaml(config_file)
     # Dataset and Dataloader setup
     train_dataset = Dataset('train')
     test_dataset = Dataset('val')

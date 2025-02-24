@@ -1,5 +1,6 @@
 from glob import glob
 import os
+import yaml 
 
 def get_image_list(data_root, split):
 	filelist = []
@@ -27,6 +28,14 @@ class HParams:
 	def set_hparam(self, key, value):
 		self.data[key] = value
 
+	def save_to_yaml(self, file_path):
+		with open(file_path, 'w') as file:
+			yaml.dump(self.data, file)
+	
+	# load YAML configuration file 
+	def load_config(self, config_path):
+		with open(config_path, 'r', encoding='utf-8') as file:
+			self.data = yaml.safe_load(file)
 
 # Default hyperparameters
 hparams = HParams(
