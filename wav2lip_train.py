@@ -210,7 +210,7 @@ def get_sync_loss(mel, g):
 def train(device, model, train_data_loader, test_data_loader, optimizer,
           checkpoint_dir=None, checkpoint_interval=None, nepochs=None):
 
-    global global_step, global_epoch
+    global global_step, global_epoch, best_eval_loss 
     resumed_step = global_step
  
     while global_epoch < nepochs:
