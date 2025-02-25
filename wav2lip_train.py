@@ -30,9 +30,10 @@ parser.add_argument('--checkpoint_dir', help='Save checkpoints to this directory
 parser.add_argument('--syncnet_checkpoint_path', help='Load the pre-trained Expert discriminator', required=True, type=str)
 
 parser.add_argument('--checkpoint_path', help='Resume from this checkpoint', default=None, type=str)
-
+parser.add_argument('--config_file', help='config yaml file', default=None, type=str)
 args = parser.parse_args()
-
+if args.config_file is not None:
+    hparams.load_config(args.config_file) # override hyperparameters with config file
 wandb.init(project=hparams.project_name, config=hparams, name=hparams.model_name + '_' + hparams.experiment_id)
 
 global_step = 0
@@ -42,6 +43,7 @@ print('use_cuda: {}'.format(use_cuda))
 
 syncnet_T = 5
 syncnet_mel_step_size = 16
+best_eval_loss = 1e3 
 
 class Dataset(object):
     def __init__(self, split):
@@ -181,7 +183,7 @@ def save_sample_images(x, g, gt, global_step, checkpoint_dir):
     for batch_idx, c in enumerate(collage):
         for t in range(len(c)):
             rgb_img = cv2.cvtColor(c[t], cv2.COLOR_BGR2RGB)
-            wandb.log({'sample_images': [wandb.Image(rgb_img, caption='batch_idx: {}, t: {}'.format(batch_idx, t))]}, step=global_step)
+            wandb.log({'sample_images': [wandb.Image(rgb_img, caption='batch_idx: {}, t: {}'.format(batch_idx, t))]})
             cv2.imwrite('{}/{}_{}.jpg'.format(folder, batch_idx, t), c[t])
 
 logloss = nn.BCELoss()
@@ -214,6 +216,7 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
     while global_epoch < nepochs:
         print('Starting Epoch: {}'.format(global_epoch))
         running_sync_loss, running_l1_loss = 0., 0.
+        running_all_loss = 0.0
         prog_bar = tqdm(enumerate(train_data_loader))
         for step, (x, indiv_mels, mel, gt) in prog_bar:
             model.train()
@@ -243,7 +246,7 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
 
             global_step += 1
             cur_session_steps = global_step - resumed_step
-
+            running_all_loss += loss.item()
             running_l1_loss += l1loss.item()
             if hparams.syncnet_wt > 0.:
                 running_sync_loss += sync_loss.item()
@@ -256,11 +259,14 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
 
             if global_step == 1 or global_step % hparams.eval_interval == 0:
                 with torch.no_grad():
-                    average_sync_loss = eval_model(test_data_loader, global_step, device, model, checkpoint_dir)
-
+                    average_sync_loss, eval_loss = eval_model(test_data_loader, global_step, device, model, checkpoint_dir)
+                    if eval_loss < best_eval_loss:
+                        best_eval_loss = eval_loss
+                        save_checkpoint(model, optimizer, global_step, checkpoint_dir, global_epoch, prefix='best_')
                     if average_sync_loss < .75:
                         hparams.set_hparam('syncnet_wt', 0.01) # without image GAN a lesser weight is sufficient
-            wandb.log({'train/l1_loss': running_l1_loss / (step + 1), 'train/sync_loss': running_sync_loss / (step + 1)}, step=global_step)
+            wandb.log({'train/l1_loss': running_l1_loss / (step + 1), 'train/sync_loss': running_sync_loss / (step + 1), 
+                       'train/loss': running_all_loss / (step + 1)}, step=global_step)
             wandb.log( {'train/syncnet_wt': hparams.syncnet_wt}, step=global_step)
             prog_bar.set_description('L1: {}, Sync Loss: {}'.format(running_l1_loss / (step + 1),
                                                                     running_sync_loss / (step + 1)))
@@ -272,6 +278,7 @@ def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
     eval_steps = 700
     print('Evaluating for {} steps'.format(eval_steps))
     sync_losses, recon_losses = [], []
+    all_loss = [] 
     step = 0
     while 1:
         for x, indiv_mels, mel, gt in test_data_loader:
@@ -288,22 +295,24 @@ def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
 
             sync_loss = get_sync_loss(mel, g)
             l1loss = recon_loss(g, gt)
-
+            loss =  hparams.syncnet_wt * sync_loss + (1 - hparams.syncnet_wt) * l1loss
             sync_losses.append(sync_loss.item())
             recon_losses.append(l1loss.item())
+            all_loss.append(loss.item())
 
             if step > eval_steps: 
                 averaged_sync_loss = sum(sync_losses) / len(sync_losses)
                 averaged_recon_loss = sum(recon_losses) / len(recon_losses)
-                wandb.log({'eval/l1_loss': averaged_recon_loss, 'eval/sync_loss': averaged_sync_loss}, step=global_step)
+                averaged_loss = sum(all_loss) / len(all_loss)
+                wandb.log({'eval/l1_loss': averaged_recon_loss, 'eval/sync_loss': averaged_sync_loss, 'eval/loss': averaged_loss}, step=global_step)
                 print('L1: {}, Sync loss: {}'.format(averaged_recon_loss, averaged_sync_loss))
 
-                return averaged_sync_loss
+                return averaged_sync_loss, averaged_loss
 
-def save_checkpoint(model, optimizer, step, checkpoint_dir, epoch):
+def save_checkpoint(model, optimizer, step, checkpoint_dir, epoch, prefix=''):
 
     checkpoint_path = join(
-        checkpoint_dir, "checkpoint_step{:09d}.pth".format(global_step))
+        checkpoint_dir, "{}checkpoint_step{:09d}.pth".format(prefix, global_step))
     optimizer_state = optimizer.state_dict() if hparams.save_optimizer_state else None
     torch.save({
         "state_dict": model.state_dict(),
@@ -346,7 +355,10 @@ def load_checkpoint(path, model, optimizer, reset_optimizer=False, overwrite_glo
 
 if __name__ == "__main__":
     checkpoint_dir = args.checkpoint_dir
-
+    if not os.path.exists(checkpoint_dir): os.mkdir(checkpoint_dir)
+    # save config into yaml
+    config_file = os.path.join(checkpoint_dir, 'hparams.yaml')
+    hparams.save_to_yaml(config_file)
     # Dataset and Dataloader setup
     train_dataset = Dataset('train')
     test_dataset = Dataset('val')

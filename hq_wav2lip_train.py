@@ -184,7 +184,7 @@ def save_sample_images(x, g, gt, global_step, checkpoint_dir):
     for batch_idx, c in enumerate(collage):
         for t in range(len(c)):
             rgb_img = cv2.cvtColor(c[t], cv2.COLOR_BGR2RGB)
-            wandb.log({'sample_images': [wandb.Image(rgb_img, caption='batch_idx: {}, t: {}'.format(batch_idx, t))]}, step=global_step)
+            wandb.log({'sample_images': [wandb.Image(rgb_img, caption='batch_idx: {}, t: {}'.format(batch_idx, t))]})
             cv2.imwrite('{}/{}_{}.jpg'.format(folder, batch_idx, t), c[t])
 
 logloss = nn.BCELoss()
