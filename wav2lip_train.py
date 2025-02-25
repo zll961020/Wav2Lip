@@ -27,7 +27,7 @@ parser = argparse.ArgumentParser(description='Code to train the Wav2Lip model wi
 parser.add_argument("--data_root", help="Root folder of the preprocessed LRS2 dataset", required=True, type=str)
 
 parser.add_argument('--checkpoint_dir', help='Save checkpoints to this directory', required=True, type=str)
-parser.add_argument('--syncnet_checkpoint_path', help='Load the pre-trained Expert discriminator', required=True, type=str)
+parser.add_argument('--syncnet_checkpoint_path', help='Load the pre-trained Expert discriminator', required=True, type=str, default=None)
 
 parser.add_argument('--checkpoint_path', help='Resume from this checkpoint', default=None, type=str)
 parser.add_argument('--config_file', help='config yaml file', default=None, type=str)
@@ -263,7 +263,7 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
                     if eval_loss < best_eval_loss:
                         best_eval_loss = eval_loss
                         save_checkpoint(model, optimizer, global_step, checkpoint_dir, global_epoch, prefix='best_')
-                    if average_sync_loss < .75:
+                    if args.syncnet_checkpoint_path is not None  and average_sync_loss < .75:
                         hparams.set_hparam('syncnet_wt', 0.01) # without image GAN a lesser weight is sufficient
             wandb.log({'train/l1_loss': running_l1_loss / (step + 1), 'train/sync_loss': running_sync_loss / (step + 1), 
                        'train/loss': running_all_loss / (step + 1)}, step=global_step)
@@ -382,8 +382,8 @@ if __name__ == "__main__":
 
     if args.checkpoint_path is not None:
         load_checkpoint(args.checkpoint_path, model, optimizer, reset_optimizer=False)
-        
-    load_checkpoint(args.syncnet_checkpoint_path, syncnet, None, reset_optimizer=True, overwrite_global_states=False)
+    if args.syncnet_checkpoint_path is not None:
+        load_checkpoint(args.syncnet_checkpoint_path, syncnet, None, reset_optimizer=True, overwrite_global_states=False)
 
     if not os.path.exists(checkpoint_dir):
         os.mkdir(checkpoint_dir)
