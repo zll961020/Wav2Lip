@@ -27,7 +27,7 @@ parser = argparse.ArgumentParser(description='Code to train the Wav2Lip model wi
 parser.add_argument("--data_root", help="Root folder of the preprocessed LRS2 dataset", required=True, type=str)
 
 parser.add_argument('--checkpoint_dir', help='Save checkpoints to this directory', required=True, type=str)
-parser.add_argument('--syncnet_checkpoint_path', help='Load the pre-trained Expert discriminator', required=True, type=str, default=None)
+parser.add_argument('--syncnet_checkpoint_path', help='Load the pre-trained Expert discriminator', required=False, type=str, default=None)
 
 parser.add_argument('--checkpoint_path', help='Resume from this checkpoint', default=None, type=str)
 parser.add_argument('--config_file', help='config yaml file', default=None, type=str)
