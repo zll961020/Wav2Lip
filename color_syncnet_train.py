@@ -190,8 +190,8 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
                         best_eval_loss = eval_loss
                         save_checkpoint(
                             model, optimizer, global_step, checkpoint_dir, global_epoch, prefix='best_')
-            wandb.log({'train/best_eval_loss': best_eval_loss}, step=global_step)
-            wandb.log({'train/loss': running_loss / (step + 1)}, step=global_step)
+            wandb.log({'train/best_eval_loss': best_eval_loss})
+            wandb.log({'train/loss': running_loss / (step + 1)})
             prog_bar.set_description('Loss: {}'.format(running_loss / (step + 1)))
 
         global_epoch += 1
@@ -220,7 +220,7 @@ def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
 
         averaged_loss = sum(losses) / len(losses)
         print(averaged_loss)
-        wandb.log({'eval/loss': averaged_loss}, step=global_step)
+        wandb.log({'eval/loss': averaged_loss})
         return averaged_loss
 
 def save_checkpoint(model, optimizer, step, checkpoint_dir, epoch, prefix=''):

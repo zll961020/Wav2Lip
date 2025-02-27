@@ -181,9 +181,10 @@ def save_sample_images(x, g, gt, global_step, checkpoint_dir):
     if not os.path.exists(folder): os.mkdir(folder)
     collage = np.concatenate((refs, inps, g, gt), axis=-2)
     for batch_idx, c in enumerate(collage):
+        c_concat = np.concatenate(c, axis=0) # 将时间维的图片按照高度拼接
+        rgb_img = cv2.cvtColor(c_concat, cv2.COLOR_BGR2RGB)
+        wandb.log({f'samplfe_images/{batch_idx}': [wandb.Image(rgb_img, caption='batch_idx: {}'.format(batch_idx))]})
         for t in range(len(c)):
-            rgb_img = cv2.cvtColor(c[t], cv2.COLOR_BGR2RGB)
-            wandb.log({'sample_images': [wandb.Image(rgb_img, caption='batch_idx: {}, t: {}'.format(batch_idx, t))]})
             cv2.imwrite('{}/{}_{}.jpg'.format(folder, batch_idx, t), c[t])
 
 logloss = nn.BCELoss()
@@ -266,8 +267,8 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
                     if args.syncnet_checkpoint_path is not None  and average_sync_loss < .75:
                         hparams.set_hparam('syncnet_wt', 0.01) # without image GAN a lesser weight is sufficient
             wandb.log({'train/l1_loss': running_l1_loss / (step + 1), 'train/sync_loss': running_sync_loss / (step + 1), 
-                       'train/loss': running_all_loss / (step + 1)}, step=global_step)
-            wandb.log( {'train/syncnet_wt': hparams.syncnet_wt}, step=global_step)
+                       'train/loss': running_all_loss / (step + 1), 'train/syncnet_wt': hparams.syncnet_wt})
+           
             prog_bar.set_description('L1: {}, Sync Loss: {}'.format(running_l1_loss / (step + 1),
                                                                     running_sync_loss / (step + 1)))
 
@@ -304,7 +305,7 @@ def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
                 averaged_sync_loss = sum(sync_losses) / len(sync_losses)
                 averaged_recon_loss = sum(recon_losses) / len(recon_losses)
                 averaged_loss = sum(all_loss) / len(all_loss)
-                wandb.log({'eval/l1_loss': averaged_recon_loss, 'eval/sync_loss': averaged_sync_loss, 'eval/loss': averaged_loss}, step=global_step)
+                wandb.log({'eval/l1_loss': averaged_recon_loss, 'eval/sync_loss': averaged_sync_loss, 'eval/loss': averaged_loss})
                 print('L1: {}, Sync loss: {}'.format(averaged_recon_loss, averaged_sync_loss))
 
                 return averaged_sync_loss, averaged_loss
