@@ -154,47 +154,51 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
     global_epoch = 0
     best_eval_loss = 1e3 
     resumed_step = global_step
-    
-    while global_epoch < nepochs:
-        print('Starting Epoch: {}'.format(global_epoch))
-        running_loss = 0.
-        prog_bar = tqdm(enumerate(train_data_loader))
-        for step, (x, mel, y) in prog_bar:
-            model.train()
-            optimizer.zero_grad()
+    # 创建一个总的进度条，表示整个训练过程
+    total_steps = nepochs * len(train_data_loader)
+    with tqdm(total=nepochs, desc='Training Progress') as pbar:
+        while global_epoch < nepochs:
+            #print('Starting Epoch: {}'.format(global_epoch))
+            running_loss = 0.
+            #prog_bar = tqdm(enumerate(train_data_loader))
+            for step, (x, mel, y) in enumerate(train_data_loader):
+                model.train()
+                optimizer.zero_grad()
 
-            # Transform data to CUDA device
-            x = x.to(device)
+                # Transform data to CUDA device
+                x = x.to(device)
 
-            mel = mel.to(device)
+                mel = mel.to(device)
 
-            a, v = model(mel, x)
-            y = y.to(device)
+                a, v = model(mel, x)
+                y = y.to(device)
 
-            loss = cosine_loss(a, v, y)
-            loss.backward()
-            optimizer.step()
+                loss = cosine_loss(a, v, y)
+                loss.backward()
+                optimizer.step()
 
-            global_step += 1
-            cur_session_steps = global_step - resumed_step
-            running_loss += loss.item()
+                global_step += 1
+                cur_session_steps = global_step - resumed_step
+                running_loss += loss.item()
+                # only save best eval model, uncomment to save all
+                # if global_step == 1 or global_step % checkpoint_interval == 0:
+                #     save_checkpoint(
+                #         model, optimizer, global_step, checkpoint_dir, global_epoch)
 
-            if global_step == 1 or global_step % checkpoint_interval == 0:
-                save_checkpoint(
-                    model, optimizer, global_step, checkpoint_dir, global_epoch)
-
-            if global_step % hparams.syncnet_eval_interval == 0:
-                with torch.no_grad():
-                    eval_loss = eval_model(test_data_loader, global_step, device, model, checkpoint_dir)
-                    if eval_loss < best_eval_loss:
-                        best_eval_loss = eval_loss
-                        save_checkpoint(
-                            model, optimizer, global_step, checkpoint_dir, global_epoch, prefix='best_')
-            wandb.log({'train/best_eval_loss': best_eval_loss})
-            wandb.log({'train/loss': running_loss / (step + 1)})
-            prog_bar.set_description('Loss: {}'.format(running_loss / (step + 1)))
-
-        global_epoch += 1
+                if global_step % hparams.syncnet_eval_interval == 0:
+                    with torch.no_grad():
+                        eval_loss = eval_model(test_data_loader, global_step, device, model, checkpoint_dir)
+                        if eval_loss < best_eval_loss:
+                            best_eval_loss = eval_loss
+                            save_checkpoint(
+                                model, optimizer, global_step, checkpoint_dir, global_epoch, prefix='best_')
+                    wandb.log({'eval/best_eval_loss': best_eval_loss, 'eval/loss': eval_loss})
+                    wandb.log({'train/loss': running_loss / (step + 1), "epoch": global_epoch + 1})
+           
+            pbar.set_description(f'Epoch {global_epoch + 1}/{nepochs} Loss: {running_loss / (step + 1):.4f}')
+            pbar.update(1)
+            global_epoch += 1
+            
 
 def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
     eval_steps = 1400
@@ -219,8 +223,8 @@ def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
             if step > eval_steps: break
 
         averaged_loss = sum(losses) / len(losses)
-        print(averaged_loss)
-        wandb.log({'eval/loss': averaged_loss})
+        #print(averaged_loss)
+        #wandb.log({'eval/loss': averaged_loss})
         return averaged_loss
 
 def save_checkpoint(model, optimizer, step, checkpoint_dir, epoch, prefix=''):
@@ -282,8 +286,8 @@ def run(args):
             setattr(hparams, key, wandb.config[key])
 
     print("Updated hparams:", hparams)
-
-    checkpoint_dir = args.checkpoint_dir
+    run_id = run.id
+    checkpoint_dir = os.path.join(args.checkpoint_dir, run_id)
     checkpoint_path = args.checkpoint_path
 
     if not os.path.exists(checkpoint_dir): os.mkdir(checkpoint_dir)

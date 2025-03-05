@@ -1,16 +1,16 @@
 # The program to run
 program: color_syncnet_train_sweep.py
 command:
-  - "--config_file=config.yaml"
-  - "--data_root=./data_root"
-  - "--checkpoint_dir=./checkpoint_dir"
+  - "--config_file=/data/zhanglingling/AI/Wav2Lip/configs/config_syncnet.yaml"
+  - "--data_root=/data/dh_dataset/lrs2_v1/mvlrs_v1/main_processed"
+  - "--checkpoint_dir=/data/zhanglingling/AI/Wav2Lip/checkpoints/syncnet_sweep"
   - "--checkpoint_path=null"
 
 # Project this sweep is part of
 project: wav2lip
 entity: lingz0124
 # Mathod to be grid, random or bayes
-method: random
+method: bayes
 
 # Metric to optimize
 metric:
