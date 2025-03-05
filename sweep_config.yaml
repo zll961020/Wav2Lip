@@ -1,0 +1,34 @@
+# The program to run
+program: color_syncnet_train_sweep.py
+command:
+  - "--config_file=config.yaml"
+  - "--data_root=./data_root"
+  - "--checkpoint_dir=./checkpoint_dir"
+  - "--checkpoint_path=null"
+
+# Project this sweep is part of
+project: wav2lip
+entity: lingz0124
+# Mathod to be grid, random or bayes
+method: random
+
+# Metric to optimize
+metric:
+  name: eval/loss
+  goal: minimize
+
+# Parameters space to search 
+parameters:
+  syncnet_lr:
+    distribution: log_uniform_values
+    max: 0.001
+    min: 0.00001
+  syncnet_batch_size:
+    values: [32, 64, 128]
+  early_terminate:
+    type: hyperband
+    min_iter: 3
+    eta: 2
+  stop:
+    max_runs: 50
+

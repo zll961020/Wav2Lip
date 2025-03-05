@@ -33,19 +33,15 @@ args = parser.parse_args()
 if args.config_file is not None:
     hparams.load_config(args.config_file) # override hyperparameters with config file
 
-if args.checkpoint_path is not None:
-    wandb.init(entity='lingz0124', project=hparams.project_name, id='ksaqh6rn', resume="must")
-else:
-    wandb.init(project=hparams.project_name, config=hparams, name=hparams.model_name + '_' + hparams.experiment_id)
 
-global_step = 0
-global_epoch = 0
+
+
 use_cuda = torch.cuda.is_available()
 print('use_cuda: {}'.format(use_cuda))
 
 syncnet_T = 5
 syncnet_mel_step_size = 16
-best_eval_loss = 1e3 
+
 
 class Dataset(object):
     def __init__(self, split):
@@ -143,8 +139,9 @@ class Dataset(object):
 
             return x, mel, y
 
-logloss = nn.BCELoss()
+
 def cosine_loss(a, v, y):
+    logloss = nn.BCELoss()
     d = nn.functional.cosine_similarity(a, v)
     loss = logloss(d.unsqueeze(1), y)
 
@@ -153,7 +150,9 @@ def cosine_loss(a, v, y):
 def train(device, model, train_data_loader, test_data_loader, optimizer,
           checkpoint_dir=None, checkpoint_interval=None, nepochs=None):
 
-    global global_step, global_epoch, best_eval_loss
+    global_step = 0
+    global_epoch = 0
+    best_eval_loss = 1e3 
     resumed_step = global_step
     
     while global_epoch < nepochs:
@@ -227,7 +226,7 @@ def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
 def save_checkpoint(model, optimizer, step, checkpoint_dir, epoch, prefix=''):
 
     checkpoint_path = join(
-        checkpoint_dir, "{}checkpoint_step{:09d}.pth".format(prefix, global_step))
+        checkpoint_dir, "{}checkpoint_step{:09d}.pth".format(prefix, step))
     optimizer_state = optimizer.state_dict() if hparams.save_optimizer_state else None
     torch.save({
         "state_dict": model.state_dict(),
@@ -262,7 +261,28 @@ def load_checkpoint(path, model, optimizer, reset_optimizer=False):
 
     return model
 
-if __name__ == "__main__":
+def update_hparams(hparams, args):
+    for key, value in args.items():
+        if hasattr(hparams, key):
+            setattr(hparams, key, value)
+        else:
+            hparams.set_hparam(key, value)
+
+def run(args):
+    # 将args 参数更新到 hparams 对象
+    update_hparams(hparams, vars(args))
+    # 初始化 wandb
+    wandb.init(project=hparams.project_name)
+    
+    # 将sweep搜索的超参数更新到hparams
+    config = wandb.config
+    # 手动同步到 hparams 对象
+    for key in wandb.config.keys():
+        if hasattr(hparams, key):
+            setattr(hparams, key, wandb.config[key])
+
+    print("Updated hparams:", hparams)
+
     checkpoint_dir = args.checkpoint_dir
     checkpoint_path = args.checkpoint_path
 
@@ -298,3 +318,36 @@ if __name__ == "__main__":
           checkpoint_dir=checkpoint_dir,
           checkpoint_interval=hparams.syncnet_checkpoint_interval,
           nepochs=hparams.nepochs)
+
+
+# sweep_config = {    
+#     'method': 'bayes',
+#     'metric': {'name': 'eval/loss', 'goal': 'minimize'},
+#     'parameters': {
+#         'syncnet_lr': {
+#             'min': 0.00001,
+#             'max': 0.001,
+#             'distribution': 'log_uniform'
+#         },
+#         'syncnet_batch_size': {
+#             'values': [32, 64, 128]
+#         }
+#     },
+#     'early_terminate': {
+#         'type': 'hyperband',
+#         'min_iter': 3,
+#         'eta': 2
+#     }, 
+#     # 添加全局终止条件
+#     'stop': {
+#         'max_runs': 50,  # 最多运行50次试验
+#         'max_duration': "72h"  # 最长运行72小时
+#     }
+# }
+# sweep_id = wandb.sweep(sweep_config, project=hparams.project_name, entity='lingz0124')
+
+# wandb.agent(sweep_id, function=run, count=4)
+
+if __name__ == "__main__":
+
+    run(args)
