@@ -286,7 +286,7 @@ def run(args):
             setattr(hparams, key, wandb.config[key])
 
     print("Updated hparams:", hparams)
-    run_id = run.id
+    run_id = wandb.run.id 
     checkpoint_dir = os.path.join(args.checkpoint_dir, run_id)
     checkpoint_path = args.checkpoint_path
 
