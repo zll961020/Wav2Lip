@@ -159,14 +159,26 @@ def main():
 		lines = filelist.readlines()
 
 	for idx, line in enumerate(tqdm(lines)):
+		vid = os.path.join(args.results_dir, '{}.mp4'.format(idx))
+		if os.path.exists(vid): continue # Skip if output exists
 		audio_src, video = line.strip().split()
 
 		audio_src = os.path.join(data_root, audio_src) + '.mp4'
 		video = os.path.join(data_root, video) + '.mp4'
+		lastdir = os.path.basename(os.path.normpath(args.results_dir))
+		# 定义目标路径（假设 lastdir 是已定义的变量）
+		target_dir = os.path.join('../temp', lastdir)  # 自动处理路径分隔符
 
-		command = 'ffmpeg -loglevel panic -y -i {} -strict -2 {}'.format(audio_src, '../temp/temp.wav')
+		# 创建目录（包括所有不存在的父目录）
+		os.makedirs(target_dir, exist_ok=True)  # exist_ok=True 表示目录存在时不报错
+
+		# 后续写入文件
+		temp_audio = os.path.join(target_dir, 'temp.wav')
+		temp_video = os.path.join(target_dir, 'result.avi')
+		
+		command = 'ffmpeg -loglevel panic -y -i {} -strict -2 {}'.format(audio_src, temp_audio)
 		subprocess.call(command, shell=True)
-		temp_audio = '../temp/temp.wav'
+		
 
 		wav = audio.load_wav(temp_audio, 16000)
 		mel = audio.melspectrogram(wav)
@@ -208,7 +220,7 @@ def main():
 		for i, (img_batch, mel_batch, frames, coords) in enumerate(gen):
 			if i == 0:
 				frame_h, frame_w = full_frames[0].shape[:-1]
-				out = cv2.VideoWriter('../temp/result.avi', 
+				out = cv2.VideoWriter(temp_video, 
 								cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
 
 			img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
@@ -228,10 +240,10 @@ def main():
 
 		out.release()
 
-		vid = os.path.join(args.results_dir, '{}.mp4'.format(idx))
+		#vid = os.path.join(args.results_dir, '{}.mp4'.format(idx))
 
 		command = 'ffmpeg -loglevel panic -y -i {} -i {} -strict -2 -q:v 1 {}'.format(temp_audio, 
-								'../temp/result.avi', vid)
+								temp_video, vid)
 		subprocess.call(command, shell=True)
 
 if __name__ == '__main__':
