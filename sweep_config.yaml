@@ -25,10 +25,14 @@ parameters:
     min: 0.00001
   syncnet_batch_size:
     values: [32, 64, 128]
-  early_terminate:
-    type: hyperband
-    min_iter: 3
-    eta: 2
-  stop:
-    max_runs: 50
+    
+# early termination 
+early_terminate:
+  type: hyperband
+  min_iter: 3
+  eta: 2
+
+# global stop condition
+stop:
+  max_runs: 50
 
