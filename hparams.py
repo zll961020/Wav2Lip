@@ -15,15 +15,23 @@ def get_image_list(data_root, split):
 
 class HParams:
 	def __init__(self, **kwargs):
-		self.data = {}
+		self.__dict__["data"] = {} 
 
 		for key, value in kwargs.items():
 			self.data[key] = value
 
 	def __getattr__(self, key):
+		if key == "data":
+			return self.__dict__["data"]  # 直接返回 __dict__ 中的 data
 		if key not in self.data:
-			raise AttributeError("'HParams' object has no attribute %s" % key)
+			raise AttributeError(f"'HParams' object has no attribute '{key}'")
 		return self.data[key]
+	
+	def __setattr__(self, key, value):
+		if key == "data":
+			self.__dict__["data"] = value
+		else:
+			self.data[key] = value
 
 	def set_hparam(self, key, value):
 		self.data[key] = value

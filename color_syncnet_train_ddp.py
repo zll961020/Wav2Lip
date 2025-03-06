@@ -289,7 +289,10 @@ def main(rank: int, world_size: int, hparams, args):
     train_data_loader = data_utils.DataLoader(
         train_dataset, batch_size=hparams.syncnet_batch_size, shuffle=False,
         sampler=DistributedSampler(train_dataset, shuffle=True),
-        num_workers=hparams.num_workers)
+        num_workers=hparams.num_workers, 
+        pin_memory=True,  # 加速数据加载
+        drop_last=True     # 避免最后一个不完整 batch
+        )
 
     test_data_loader = data_utils.DataLoader(
         test_dataset, batch_size=hparams.syncnet_batch_size,
@@ -331,6 +334,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.config_file is not None:
         hparams.load_from_yaml(args.config_file) # override hyperparameters with config file
+    print(f'hparams: {hparams.data}')
     world_size = torch.cuda.device_count()  
     print(f'world_size: {world_size}')
     mp.spawn(main, args=(world_size, hparams, args), nprocs=world_size)
