@@ -294,8 +294,16 @@ def main(rank: int, world_size: int, hparams:HParams):
     hparams = hparams_list[0]
 
     # Dataset and Dataloader setup
-    train_dataset = Dataset('train', **hparams.data)
-    test_dataset = Dataset('val', **hparams.data)
+    dataset_params = {
+        'data_root': hparams.data_root,
+        'img_size': hparams.img_size,
+        'syncnet_T': hparams.syncnet_T,
+        'syncnet_mel_step_size': hparams.syncnet_mel_step_size,
+        'sample_rate': hparams.sample_rate,
+        'fps': hparams.fps
+    }
+    train_dataset = Dataset('train',  **dataset_params)
+    test_dataset = Dataset('val',  **dataset_params)
 
     train_data_loader = data_utils.DataLoader(
         train_dataset, batch_size=hparams.syncnet_batch_size, shuffle=False,
@@ -308,7 +316,7 @@ def main(rank: int, world_size: int, hparams:HParams):
     test_data_loader = data_utils.DataLoader(
         test_dataset, batch_size=hparams.syncnet_batch_size,
         shuffle=False, sampler=DistributedSampler(test_dataset, shuffle=False),
-        num_workers=hparams.num_workers)
+        num_workers=hparams.num_workers, pin_memory=True)
 
     device = rank 
     # Model
