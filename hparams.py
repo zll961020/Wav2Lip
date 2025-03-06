@@ -32,7 +32,12 @@ class HParams:
 			self.__dict__["data"] = value
 		else:
 			self.data[key] = value
-
+	def __getstate__(self):
+		return self.__dict__.copy()
+	
+	def __setstate__(self, state):
+		self.__dict__.update(state)
+		
 	def set_hparam(self, key, value):
 		self.data[key] = value
 
