@@ -15,6 +15,12 @@ from glob import glob
 
 import os, random, cv2, argparse
 from hparams import hparams, get_image_list
+from tools.utils import timing_decorator
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group, destroy_process_group
+from torch.utils.data.distributed import DistributedSampler
+from contextlib import nullcontext
+
 from dotenv import load_dotenv
 load_dotenv()
 wandb_api_key = os.getenv('WANDB_API_KEY')
@@ -30,8 +36,7 @@ parser.add_argument('--config_file', help='config yaml file',default=None, type=
 
 
 args = parser.parse_args()
-if args.config_file is not None:
-    hparams.load_config(args.config_file) # override hyperparameters with config file
+
 
 
 
@@ -41,6 +46,40 @@ print('use_cuda: {}'.format(use_cuda))
 
 syncnet_T = 5
 syncnet_mel_step_size = 16
+
+ # various inits, derived attributes, I/O setup
+ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
+if ddp:
+    init_process_group(backend=hparams.backend)
+    ddp_rank = int(os.environ['RANK'])
+    ddp_local_rank = int(os.environ['LOCAL_RANK'])
+    ddp_world_size = int(os.environ['WORLD_SIZE'])
+    device = f'cuda:{ddp_local_rank}'
+    torch.cuda.set_device(device)
+    master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
+    seed_offset = ddp_rank # each process gets a different seed
+    # world_size number of processes will be training simultaneously, so we can scale
+    # down the desired gradient accumulation iterations per process proportionally
+    if hparams.gradient_accumulation_steps > 1:
+        assert hparams.gradient_accumulation_steps % ddp_world_size == 0
+        hparams.gradient_accumulation_steps //= ddp_world_size
+else:
+    # if not ddp, we are running on a single gpu, and one process
+    master_process = True
+    seed_offset = 0
+    ddp_world_size = 1
+    device = hparams.device 
+
+torch.manual_seed(1337 + seed_offset)
+random.seed(1337 + seed_offset)
+np.random.seed(1337 + seed_offset)
+torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
+# note: float16 data type will automatically use a GradScaler
+ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[hparams.dtype]
+ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+
 
 
 class Dataset(object):
@@ -154,6 +193,7 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
     global_epoch = 0
     best_eval_loss = 1e3 
     resumed_step = global_step
+    raw_model = model.module if ddp else model
     # 创建一个总的进度条，表示整个训练过程
     total_steps = nepochs * len(train_data_loader)
     with tqdm(total=nepochs, desc='Training Progress') as pbar:
@@ -161,6 +201,7 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
             #print('Starting Epoch: {}'.format(global_epoch))
             running_loss = 0.
             #prog_bar = tqdm(enumerate(train_data_loader))
+            train_data_loader.sampler.set_epoch(global_epoch) 
             for step, (x, mel, y) in enumerate(train_data_loader):
                 model.train()
                 optimizer.zero_grad()
@@ -169,29 +210,29 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
                 x = x.to(device)
 
                 mel = mel.to(device)
+                with ctx:
+                    a, v = model(mel, x)
+                    y = y.to(device)
 
-                a, v = model(mel, x)
-                y = y.to(device)
+                    loss = cosine_loss(a, v, y)
+                    loss.backward()
+                    optimizer.step()
 
-                loss = cosine_loss(a, v, y)
-                loss.backward()
-                optimizer.step()
-
-                global_step += 1
-                cur_session_steps = global_step - resumed_step
-                running_loss += loss.item()
+                    global_step += 1
+                    cur_session_steps = global_step - resumed_step
+                    running_loss += loss.item()
                 # only save best eval model, uncomment to save all
                 # if global_step == 1 or global_step % checkpoint_interval == 0:
                 #     save_checkpoint(
                 #         model, optimizer, global_step, checkpoint_dir, global_epoch)
 
-                if global_step % hparams.syncnet_eval_interval == 0:
+                if global_step % hparams.syncnet_eval_interval == 0 and master_process:
                     with torch.no_grad():
                         eval_loss = eval_model(test_data_loader, global_step, device, model, checkpoint_dir)
                         if eval_loss < best_eval_loss:
                             best_eval_loss = eval_loss
                             save_checkpoint(
-                                model, optimizer, global_step, checkpoint_dir, global_epoch, prefix='best_')
+                                raw_model, optimizer, global_step, checkpoint_dir, global_epoch, prefix='best_')
                     wandb.log({'eval/best_eval_loss': best_eval_loss, 'eval/loss': eval_loss})
                     wandb.log({'train/loss': running_loss / (step + 1), "epoch": global_epoch + 1})
            
@@ -199,7 +240,7 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
             pbar.update(1)
             global_epoch += 1
             
-
+@torch.no_grad() 
 def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
     eval_steps = 1400
     print('Evaluating for {} steps'.format(eval_steps))
@@ -211,14 +252,13 @@ def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
 
             # Transform data to CUDA device
             x = x.to(device)
-
             mel = mel.to(device)
-
-            a, v = model(mel, x)
             y = y.to(device)
+            with ctx:
+                a, v = model(mel, x)
 
-            loss = cosine_loss(a, v, y)
-            losses.append(loss.item())
+                loss = cosine_loss(a, v, y)
+                losses.append(loss.item())
 
             if step > eval_steps: break
 
@@ -240,20 +280,20 @@ def save_checkpoint(model, optimizer, step, checkpoint_dir, epoch, prefix=''):
     }, checkpoint_path)
     print("Saved checkpoint:", checkpoint_path)
 
-def _load(checkpoint_path):
+def _load(checkpoint_path, device):
     if use_cuda:
-        checkpoint = torch.load(checkpoint_path)
+        checkpoint = torch.load(checkpoint_path, map_location=device)
     else:
         checkpoint = torch.load(checkpoint_path,
                                 map_location=lambda storage, loc: storage)
     return checkpoint
 
-def load_checkpoint(path, model, optimizer, reset_optimizer=False):
+def load_checkpoint(path, device, model, optimizer,  reset_optimizer=False):
     global global_step
     global global_epoch
 
     print("Load checkpoint from: {}".format(path))
-    checkpoint = _load(path)
+    checkpoint = _load(path, device)
     model.load_state_dict(checkpoint["state_dict"])
     if not reset_optimizer:
         optimizer_state = checkpoint["optimizer"]
@@ -272,41 +312,82 @@ def update_hparams(hparams, args):
         else:
             hparams.set_hparam(key, value)
 
+@timing_decorator 
 def run(args):
-    # 将args 参数更新到 hparams 对象
-    update_hparams(hparams, vars(args))
+   
+   
     # 初始化 wandb
-    wandb.init(project=hparams.project_name)
+    if master_process:
+        # 将args 参数更新到 hparams 对象
+        if args.config_file is not None:
+            hparams.load_from_yaml(args.config_file) # override hyperparameters with config file
+        update_hparams(hparams, vars(args))
+        wandb.init(project=hparams.project_name)
     
-    # 将sweep搜索的超参数更新到hparams
-    config = wandb.config
-    # 手动同步到 hparams 对象
-    for key in wandb.config.keys():
-        if hasattr(hparams, key):
-            setattr(hparams, key, wandb.config[key])
+        # 将sweep搜索的超参数更新到hparams
+        config = wandb.config
+        # 手动同步到 hparams 对象
+        for key in wandb.config.keys():
+            if hasattr(hparams, key):
+                setattr(hparams, key, wandb.config[key])
 
-    print("Updated hparams:", hparams)
-    run_id = wandb.run.id 
-    checkpoint_dir = os.path.join(args.checkpoint_dir, run_id)
-    checkpoint_path = args.checkpoint_path
-
-    if not os.path.exists(checkpoint_dir): os.mkdir(checkpoint_dir)
-    # save yaml configuration file 
-    config_file = os.path.join(checkpoint_dir, 'hparams.yaml')
-    hparams.save_to_yaml(config_file)
+        print("Updated hparams:", hparams)
+        run_id = wandb.run.id 
+        checkpoint_dir = os.path.join(args.checkpoint_dir, run_id)
+        checkpoint_path = args.checkpoint_path
+        if not os.path.exists(checkpoint_dir): 
+            os.mkdir(checkpoint_dir)
+        # save yaml configuration file 
+        config_file = os.path.join(checkpoint_dir, 'hparams.yaml')
+        hparams.save_to_yaml(config_file)
+    # 分布式同步：确保所有进程加载相同 hparams
+    if ddp:
+        torch.distributed.barrier()  # 等待主进程完成文件写入
+        hparams.load_from_yaml(config_file)  # 所有进程读取同一配置
     # Dataset and Dataloader setup
     train_dataset = Dataset('train')
     test_dataset = Dataset('val')
 
+    if ddp:
+        train_sampler = DistributedSampler(train_dataset, shuffle=True)
+        test_sampler = DistributedSampler(test_dataset, shuffle=False)
+    else:
+        train_sampler = None
+        test_sampler = None
+    num_workers = hparams.num_workers // ddp_world_size if ddp else hparams.num_workers
+    if ddp:
+        batch_size_per_gpu = hparams.syncnet_batch_size // ddp_world_size
+    else:
+        batch_size_per_gpu = hparams.syncnet_batch_size
     train_data_loader = data_utils.DataLoader(
-        train_dataset, batch_size=hparams.syncnet_batch_size, shuffle=True,
-        num_workers=hparams.num_workers)
+        train_dataset, 
+        batch_size=batch_size_per_gpu, 
+        sampler=train_sampler,
+        shuffle=(not ddp),  # DDP 时用 sampler 控制 shuffle
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=True
+    )
 
     test_data_loader = data_utils.DataLoader(
-        test_dataset, batch_size=hparams.syncnet_batch_size,
-        num_workers=8)
+        test_dataset, 
+        batch_size=batch_size_per_gpu,
+        sampler=test_sampler,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=False
+    )
+   
+    # train_data_loader = data_utils.DataLoader(
+    #     train_dataset, batch_size=hparams.syncnet_batch_size, shuffle=True,
+    #     num_workers=hparams.num_workers)
 
-    device = torch.device("cuda" if use_cuda else "cpu")
+    # test_data_loader = data_utils.DataLoader(
+    #     test_dataset, batch_size=hparams.syncnet_batch_size,
+    #     num_workers=8)
+
+    device = torch.device(device if use_cuda else "cpu")
 
     # Model
     model = SyncNet().to(device)
@@ -316,14 +397,25 @@ def run(args):
                            lr=hparams.syncnet_lr)
 
     if checkpoint_path is not None:
-        load_checkpoint(checkpoint_path, model, optimizer, reset_optimizer=False)
+        load_checkpoint(checkpoint_path, device, model, optimizer, reset_optimizer=False)
+    
+    # compile the model
+    if hparams.compile:
+        print("compiling the model... (takes a ~minute)")
+        unoptimized_model = model
+        model = torch.compile(model) # requires PyTorch 2.0
+
+    # wrap model into DDP container
+    if ddp:
+        model = DDP(model, device_ids=[ddp_local_rank])
 
     train(device, model, train_data_loader, test_data_loader, optimizer,
           checkpoint_dir=checkpoint_dir,
           checkpoint_interval=hparams.syncnet_checkpoint_interval,
           nepochs=hparams.nepochs)
 
-
+    if ddp:
+        destroy_process_group()
 # sweep_config = {    
 #     'method': 'bayes',
 #     'metric': {'name': 'eval/loss', 'goal': 'minimize'},

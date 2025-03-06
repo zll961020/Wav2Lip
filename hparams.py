@@ -33,7 +33,7 @@ class HParams:
 			yaml.dump(self.data, file)
 	
 	# load YAML configuration file 
-	def load_config(self, config_path):
+	def load_from_yaml(self, config_path):
 		with open(config_path, 'r', encoding='utf-8') as file:
 			self.data = yaml.safe_load(file)
 

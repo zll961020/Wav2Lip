@@ -15,38 +15,23 @@ from glob import glob
 
 import os, random, cv2, argparse
 from hparams import hparams, get_image_list
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group, destroy_process_group
+from torch.utils.data.distributed import DistributedSampler
+import torch.multiprocessing as mp
 from dotenv import load_dotenv
 load_dotenv()
 wandb_api_key = os.getenv('WANDB_API_KEY')
 import wandb
 wandb.login(key=wandb_api_key, host='http://10.10.185.1:8080')
-parser = argparse.ArgumentParser(description='Code to train the expert lip-sync discriminator')
-
-parser.add_argument("--data_root", help="Root folder of the preprocessed LRS2 dataset", required=True)
-
-parser.add_argument('--checkpoint_dir', help='Save checkpoints to this directory', required=True, type=str)
-parser.add_argument('--checkpoint_path', help='Resumed from this checkpoint', default=None, type=str)
-parser.add_argument('--config_file', help='config yaml file',default=None, type=str)
 
 
-args = parser.parse_args()
-if args.config_file is not None:
-    hparams.load_from_yaml(args.config_file) # override hyperparameters with config file
-
-if args.checkpoint_path is not None:
-    wandb.init(entity='lingz0124', project=hparams.project_name, id=hparams.run_id, resume="must")
-else:
-    wandb.init(project=hparams.project_name, config=hparams, name=hparams.model_name + '_' + hparams.experiment_id)
-run_id = wandb.run.id
-hparams.set_hparam('run_id', run_id) 
-global_step = 0
-global_epoch = 0
 use_cuda = torch.cuda.is_available()
 print('use_cuda: {}'.format(use_cuda))
 
 syncnet_T = 5
 syncnet_mel_step_size = 16
-best_eval_loss = 1e3 
+
 
 class Dataset(object):
     def __init__(self, split):
@@ -144,26 +129,30 @@ class Dataset(object):
 
             return x, mel, y
 
-logloss = nn.BCELoss()
+
 def cosine_loss(a, v, y):
+    logloss = nn.BCELoss()
     d = nn.functional.cosine_similarity(a, v)
     loss = logloss(d.unsqueeze(1), y)
 
     return loss
 
 def train(device, model, train_data_loader, test_data_loader, optimizer,
-          checkpoint_dir=None, checkpoint_interval=None, nepochs=None):
+          checkpoint_dir=None, checkpoint_interval=None, syncnet_eval_interval=None, 
+          nepochs=None, start_epoch=-1, global_step=0, best_eval_loss=1e3):
 
-    global global_step, global_epoch, best_eval_loss
-    resumed_step = global_step
     
-    while global_epoch < nepochs:
-        print('Starting Epoch: {}'.format(global_epoch))
+    resumed_step = start_epoch
+    total_epochs = nepochs - start_epoch - 1
+    if device == 0:
+        pbar = tqdm(total=total_epochs, desc='Training Progress')
+    for global_epoch in range(start_epoch + 1, nepochs):
+        
         running_loss = 0.
-        prog_bar = tqdm(enumerate(train_data_loader))
-        for step, (x, mel, y) in prog_bar:
+        
+        for step, (x, mel, y) in enumerate(train_data_loader):
             model.train()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
             # Transform data to CUDA device
             x = x.to(device)
@@ -181,22 +170,24 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
             cur_session_steps = global_step - resumed_step
             running_loss += loss.item()
 
-            if global_step == 1 or global_step % checkpoint_interval == 0:
-                save_checkpoint(
-                    model, optimizer, global_step, checkpoint_dir, global_epoch)
+            # if global_step % checkpoint_interval and device == 0:
+            #     save_checkpoint(
+            #         model, optimizer, global_step, checkpoint_dir, global_epoch)
 
-            if global_step % hparams.syncnet_eval_interval == 0:
+            if global_step % syncnet_eval_interval == 0 and device == 0:
                 with torch.no_grad():
                     eval_loss = eval_model(test_data_loader, global_step, device, model, checkpoint_dir)
                     if eval_loss < best_eval_loss:
                         best_eval_loss = eval_loss
                         save_checkpoint(
-                            model, optimizer, global_step, checkpoint_dir, global_epoch, prefix='best_')
-            wandb.log({'train/best_eval_loss': best_eval_loss})
-            wandb.log({'train/loss': running_loss / (step + 1)})
-            prog_bar.set_description('Loss: {}'.format(running_loss / (step + 1)))
-
-        global_epoch += 1
+                            model, optimizer, global_step, checkpoint_dir, global_epoch, prefix='best_', best_eval_loss=best_eval_loss)
+                wandb.log({'eval/best_eval_loss': best_eval_loss, 'eval/loss': eval_loss})
+                wandb.log({'train/loss': running_loss / (step + 1)})
+        if device == 0:
+            pbar.set_description('epoch: {} Loss: {} eval loss: {} best_eval_loss: {}'.format(global_epoch, running_loss / (step + 1), eval_loss, best_eval_loss))
+            pbar.update(1)
+    if device == 0:
+        pbar.close()
 
 def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
     eval_steps = 1400
@@ -221,37 +212,37 @@ def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
             if step > eval_steps: break
 
         averaged_loss = sum(losses) / len(losses)
-        print(averaged_loss)
-        wandb.log({'eval/loss': averaged_loss})
+        #print(averaged_loss)
+        #wandb.log({'eval/loss': averaged_loss})
         return averaged_loss
 
-def save_checkpoint(model, optimizer, step, checkpoint_dir, epoch, prefix=''):
+def save_checkpoint(model, optimizer, step, checkpoint_dir, epoch, prefix='', best_eval_loss=1e3):
 
     checkpoint_path = join(
         checkpoint_dir, "{}checkpoint_step{:09d}.pth".format(prefix, global_step))
     optimizer_state = optimizer.state_dict() if hparams.save_optimizer_state else None
     torch.save({
-        "state_dict": model.state_dict(),
+        "state_dict": model.module.state_dict(), # for ddp model 
         "optimizer": optimizer_state,
         "global_step": step,
         "global_epoch": epoch,
+        "best_eval_loss": best_eval_loss
     }, checkpoint_path)
     print("Saved checkpoint:", checkpoint_path)
 
-def _load(checkpoint_path):
+def _load(checkpoint_path, device):
     if use_cuda:
-        checkpoint = torch.load(checkpoint_path)
+        checkpoint = torch.load(checkpoint_path, map_location='cuda:{}'.format(device))
     else:
         checkpoint = torch.load(checkpoint_path,
                                 map_location=lambda storage, loc: storage)
     return checkpoint
 
-def load_checkpoint(path, model, optimizer, reset_optimizer=False):
-    global global_step
-    global global_epoch
+def load_checkpoint(path, model, optimizer, device, reset_optimizer=False):
+   
 
     print("Load checkpoint from: {}".format(path))
-    checkpoint = _load(path)
+    checkpoint = _load(path, device)
     model.load_state_dict(checkpoint["state_dict"])
     if not reset_optimizer:
         optimizer_state = checkpoint["optimizer"]
@@ -260,42 +251,89 @@ def load_checkpoint(path, model, optimizer, reset_optimizer=False):
             optimizer.load_state_dict(checkpoint["optimizer"])
     global_step = checkpoint["global_step"]
     global_epoch = checkpoint["global_epoch"]
+    best_eval_loss = checkpoint.get("best_eval_loss", 1e3)
 
-    return model
+    return model, global_step, global_epoch, best_eval_loss
 
-if __name__ == "__main__":
+
+def ddp_setup(rank, world_size):
+    """
+    Args:
+        rank: Unique identifier of each process
+        world_size: Total number of processes
+    """
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12355"
+    torch.cuda.set_device(rank)
+    init_process_group(backend="nccl", rank=rank, world_size=world_size)
+
+def main(rank: int, world_size: int, hparams, args):
+    ddp_setup(rank, world_size)
     checkpoint_dir = args.checkpoint_dir
     checkpoint_path = args.checkpoint_path
-
-    if not os.path.exists(checkpoint_dir): os.mkdir(checkpoint_dir)
-    # save yaml configuration file 
-    config_file = os.path.join(checkpoint_dir, 'hparams.yaml')
-    hparams.save_to_yaml(config_file)
+    if rank == 0: 
+        
+        if args.checkpoint_path is not None:
+            wandb.init(entity='lingz0124', project=hparams.project_name, id=hparams.wandb_id, resume="must")
+        else:
+            wandb.init(project=hparams.project_name, config=hparams, name=hparams.model_name + '_' + hparams.experiment_id)
+        hparams.set_hparam('wandb_id', wandb.run.id)
+        if not os.path.exists(checkpoint_dir): os.mkdir(checkpoint_dir)
+        # save yaml configuration file 
+        config_file = os.path.join(checkpoint_dir, 'hparams.yaml')
+        hparams.save_to_yaml(config_file)
     # Dataset and Dataloader setup
     train_dataset = Dataset('train')
     test_dataset = Dataset('val')
 
     train_data_loader = data_utils.DataLoader(
-        train_dataset, batch_size=hparams.syncnet_batch_size, shuffle=True,
+        train_dataset, batch_size=hparams.syncnet_batch_size, shuffle=False,
+        sampler=DistributedSampler(train_dataset, shuffle=True),
         num_workers=hparams.num_workers)
 
     test_data_loader = data_utils.DataLoader(
         test_dataset, batch_size=hparams.syncnet_batch_size,
-        num_workers=8)
+        shuffle=False, sampler=DistributedSampler(test_dataset, shuffle=False),
+        num_workers=hparams.num_workers)
 
-    device = torch.device("cuda" if use_cuda else "cpu")
-
+    device = rank 
     # Model
     model = SyncNet().to(device)
+   
     print('total trainable params {}'.format(sum(p.numel() for p in model.parameters() if p.requires_grad)))
 
     optimizer = optim.Adam([p for p in model.parameters() if p.requires_grad],
                            lr=hparams.syncnet_lr)
 
     if checkpoint_path is not None:
-        load_checkpoint(checkpoint_path, model, optimizer, reset_optimizer=False)
-
+        model, global_step, global_epoch, best_eval_loss=load_checkpoint(checkpoint_path, model, optimizer, device, reset_optimizer=False)
+    # 
+    model = DDP(model, device_ids=[device])
     train(device, model, train_data_loader, test_data_loader, optimizer,
           checkpoint_dir=checkpoint_dir,
           checkpoint_interval=hparams.syncnet_checkpoint_interval,
-          nepochs=hparams.nepochs)
+          syncnet_eval_interval=hparams.syncnet_eval_interval, 
+          nepochs=hparams.nepochs, start_epoch=global_epoch, global_step=global_step, best_eval_loss=best_eval_loss)
+    if rank == 0:
+        wandb.finish()
+    destroy_process_group()
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Code to train the expert lip-sync discriminator')
+
+    parser.add_argument("--data_root", help="Root folder of the preprocessed LRS2 dataset", required=True)
+
+    parser.add_argument('--checkpoint_dir', help='Save checkpoints to this directory', required=True, type=str)
+    parser.add_argument('--checkpoint_path', help='Resumed from this checkpoint', default=None, type=str)
+    parser.add_argument('--config_file', help='config yaml file',default=None, type=str)
+
+
+    args = parser.parse_args()
+    if args.config_file is not None:
+        hparams.load_from_yaml(args.config_file) # override hyperparameters with config file
+    world_size = torch.cuda.device_count()  
+    print(f'world_size: {world_size}')
+    mp.spawn(main, args=(world_size, hparams, args), nprocs=world_size)
+    
+
+   

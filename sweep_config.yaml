@@ -9,6 +9,8 @@ command:
 # Project this sweep is part of
 project: wav2lip
 entity: lingz0124
+
+name: syncnet_sweep
 # Mathod to be grid, random or bayes
 method: bayes
 
