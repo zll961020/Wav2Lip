@@ -48,7 +48,9 @@ class HParams:
 	# load YAML configuration file 
 	def load_from_yaml(self, config_path):
 		with open(config_path, 'r', encoding='utf-8') as file:
-			self.data = yaml.safe_load(file)
+			config = yaml.safe_load(file)
+			for key, value in config.items():
+				self.data[key] = value
 	
 	def update_params(self, args):
 		for key, value in args.__dict__.items():
