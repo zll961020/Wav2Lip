@@ -37,7 +37,7 @@ class HParams:
 	
 	def __setstate__(self, state):
 		self.__dict__.update(state)
-		
+
 	def set_hparam(self, key, value):
 		self.data[key] = value
 
@@ -49,6 +49,10 @@ class HParams:
 	def load_from_yaml(self, config_path):
 		with open(config_path, 'r', encoding='utf-8') as file:
 			self.data = yaml.safe_load(file)
+	
+	def update_params(self, args):
+		for key, value in args.__dict__.items():
+			self.data[key] = value
 
 # Default hyperparameters
 hparams = HParams(
@@ -114,6 +118,8 @@ hparams = HParams(
 	syncnet_lr=1e-4,
 	syncnet_eval_interval=10000,
 	syncnet_checkpoint_interval=10000,
+	syncnet_T=5,
+	syncnet_mel_step_size=16,
 
 	disc_wt=0.07,
 	disc_initial_learning_rate=1e-4,

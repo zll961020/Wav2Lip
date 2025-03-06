@@ -12,9 +12,9 @@ from torch.utils import data as data_utils
 import numpy as np
 
 from glob import glob
-
+from torch.utils.data import Dataset
 import os, random, cv2, argparse
-from hparams import hparams, get_image_list
+from hparams import hparams, HParams, get_image_list
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 from torch.utils.data.distributed import DistributedSampler
@@ -29,13 +29,18 @@ wandb.login(key=wandb_api_key, host='http://10.10.185.1:8080')
 use_cuda = torch.cuda.is_available()
 print('use_cuda: {}'.format(use_cuda))
 
-syncnet_T = 5
-syncnet_mel_step_size = 16
+# syncnet_T = 5
+# syncnet_mel_step_size = 16
 
 
-class Dataset(object):
-    def __init__(self, split):
-        self.all_videos = get_image_list(args.data_root, split)
+class Dataset(Dataset):
+    def __init__(self, split, data_root, img_size=96, syncnet_T=5, syncnet_mel_step_size=16, sample_rate=16000, fps=25):
+        self.all_videos = get_image_list(data_root, split)
+        self.syncnet_T = syncnet_T
+        self.syncnet_mel_step_size = syncnet_mel_step_size
+        self.img_size = img_size
+        self.sample_rate = sample_rate
+        self.fps = fps 
 
     def get_frame_id(self, frame):
         return int(basename(frame).split('.')[0])
@@ -45,7 +50,7 @@ class Dataset(object):
         vidname = dirname(start_frame)
 
         window_fnames = []
-        for frame_id in range(start_id, start_id + syncnet_T):
+        for frame_id in range(start_id, start_id + self.syncnet_T):
             frame = join(vidname, '{}.jpg'.format(frame_id))
             if not isfile(frame):
                 return None
@@ -55,9 +60,9 @@ class Dataset(object):
     def crop_audio_window(self, spec, start_frame):
         # num_frames = (T x hop_size * fps) / sample_rate
         start_frame_num = self.get_frame_id(start_frame)
-        start_idx = int(80. * (start_frame_num / float(hparams.fps)))
+        start_idx = int(80. * (start_frame_num / float(self.fps)))
 
-        end_idx = start_idx + syncnet_mel_step_size
+        end_idx = start_idx + self.syncnet_mel_step_size
 
         return spec[start_idx : end_idx, :]
 
@@ -71,7 +76,7 @@ class Dataset(object):
             vidname = self.all_videos[idx]
 
             img_names = list(glob(join(vidname, '*.jpg')))
-            if len(img_names) <= 3 * syncnet_T:
+            if len(img_names) <= 3 * self.syncnet_T:
                 continue
             img_name = random.choice(img_names)
             wrong_img_name = random.choice(img_names)
@@ -97,7 +102,7 @@ class Dataset(object):
                     all_read = False
                     break
                 try:
-                    img = cv2.resize(img, (hparams.img_size, hparams.img_size))
+                    img = cv2.resize(img, (self.img_size, self.img_size))
                 except Exception as e:
                     all_read = False
                     break
@@ -108,7 +113,7 @@ class Dataset(object):
 
             try:
                 wavpath = join(vidname, "audio.wav")
-                wav = audio.load_wav(wavpath, hparams.sample_rate)
+                wav = audio.load_wav(wavpath, self.sample_rate)
 
                 orig_mel = audio.melspectrogram(wav).T
             except Exception as e:
@@ -116,7 +121,7 @@ class Dataset(object):
 
             mel = self.crop_audio_window(orig_mel.copy(), img_name)
 
-            if (mel.shape[0] != syncnet_mel_step_size):
+            if (mel.shape[0] != self.syncnet_mel_step_size):
                 continue
 
             # H x W x 3 * T
@@ -219,8 +224,8 @@ def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
 def save_checkpoint(model, optimizer, step, checkpoint_dir, epoch, prefix='', best_eval_loss=1e3):
 
     checkpoint_path = join(
-        checkpoint_dir, "{}checkpoint_step{:09d}.pth".format(prefix, global_step))
-    optimizer_state = optimizer.state_dict() if hparams.save_optimizer_state else None
+        checkpoint_dir, "{}checkpoint_step{:09d}.pth".format(prefix, step))
+    optimizer_state = optimizer.state_dict() 
     torch.save({
         "state_dict": model.module.state_dict(), # for ddp model 
         "optimizer": optimizer_state,
@@ -267,20 +272,19 @@ def ddp_setup(rank, world_size):
     torch.cuda.set_device(rank)
     init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
-def main(rank: int, world_size: int, hparams, args):
+def main(rank: int, world_size: int, hparams:HParams):
     ddp_setup(rank, world_size)
-    checkpoint_dir = args.checkpoint_dir
-    checkpoint_path = args.checkpoint_path
+   
     if rank == 0: 
         
-        if args.checkpoint_path is not None:
+        if hparams.checkpoint_path is not None:
             wandb.init(entity='lingz0124', project=hparams.project_name, id=hparams.wandb_id, resume="must")
         else:
             wandb.init(project=hparams.project_name, config=hparams, name=hparams.model_name + '_' + hparams.experiment_id)
         hparams.set_hparam('wandb_id', wandb.run.id)
-        if not os.path.exists(checkpoint_dir): os.mkdir(checkpoint_dir)
+        if not os.path.exists(hparams.checkpoint_dir): os.mkdir(hparams.checkpoint_dir)
         # save yaml configuration file 
-        config_file = os.path.join(checkpoint_dir, 'hparams.yaml')
+        config_file = os.path.join(hparams.checkpoint_dir, 'hparams.yaml')
         hparams.save_to_yaml(config_file)
     
         hparams_list = [hparams]
@@ -290,8 +294,8 @@ def main(rank: int, world_size: int, hparams, args):
     hparams = hparams_list[0]
 
     # Dataset and Dataloader setup
-    train_dataset = Dataset('train')
-    test_dataset = Dataset('val')
+    train_dataset = Dataset('train', **hparams.data)
+    test_dataset = Dataset('val', **hparams.data)
 
     train_data_loader = data_utils.DataLoader(
         train_dataset, batch_size=hparams.syncnet_batch_size, shuffle=False,
@@ -315,18 +319,23 @@ def main(rank: int, world_size: int, hparams, args):
     optimizer = optim.Adam([p for p in model.parameters() if p.requires_grad],
                            lr=hparams.syncnet_lr)
 
-    if checkpoint_path is not None:
-        model, global_step, global_epoch, best_eval_loss=load_checkpoint(checkpoint_path, model, optimizer, device, reset_optimizer=False)
-    # 
+    if hparams.checkpoint_path is not None:
+        model, global_step, global_epoch, best_eval_loss=load_checkpoint(hparams.checkpoint_path, model, optimizer, device, reset_optimizer=False)
+    else:
+        global_step = 0
+        global_epoch = -1
+        best_eval_loss = 1e3
     model = DDP(model, device_ids=[device])
     train(device, model, train_data_loader, test_data_loader, optimizer,
-          checkpoint_dir=checkpoint_dir,
+          checkpoint_dir=hparams.checkpoint_dir,
           checkpoint_interval=hparams.syncnet_checkpoint_interval,
           syncnet_eval_interval=hparams.syncnet_eval_interval, 
           nepochs=hparams.nepochs, start_epoch=global_epoch, global_step=global_step, best_eval_loss=best_eval_loss)
     if rank == 0:
         wandb.finish()
     destroy_process_group()
+
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Code to train the expert lip-sync discriminator')
@@ -341,10 +350,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.config_file is not None:
         hparams.load_from_yaml(args.config_file) # override hyperparameters with config file
+    # combine with args
+    hparams.update_params(args)
     print(f'hparams: {hparams.data}')
     world_size = torch.cuda.device_count()  
     print(f'world_size: {world_size}')
-    mp.spawn(main, args=(world_size, hparams, args), nprocs=world_size)
+    mp.spawn(main, args=(world_size, hparams), nprocs=world_size)
     
 
    
