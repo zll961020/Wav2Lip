@@ -15,6 +15,7 @@ from glob import glob
 
 import os, random, cv2, argparse
 from hparams import hparams, get_image_list
+from tools.utils import timing_decorator
 from dotenv import load_dotenv
 load_dotenv()
 wandb_api_key = os.getenv('WANDB_API_KEY')
@@ -299,3 +300,4 @@ if __name__ == "__main__":
           checkpoint_dir=checkpoint_dir,
           checkpoint_interval=hparams.syncnet_checkpoint_interval,
           nepochs=hparams.nepochs)
+    wandb.finish()
