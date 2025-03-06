@@ -282,6 +282,13 @@ def main(rank: int, world_size: int, hparams, args):
         # save yaml configuration file 
         config_file = os.path.join(checkpoint_dir, 'hparams.yaml')
         hparams.save_to_yaml(config_file)
+    
+        hparams_list = [hparams]
+    else:
+        hparams_list = [None]
+    torch.distributed.broadcast_object_list(hparams_list, src=0)
+    hparams = hparams_list[0]
+
     # Dataset and Dataloader setup
     train_dataset = Dataset('train')
     test_dataset = Dataset('val')
