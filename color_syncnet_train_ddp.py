@@ -182,8 +182,8 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
                         best_eval_loss = eval_loss
                         save_checkpoint(
                             model, optimizer, global_step, checkpoint_dir, global_epoch, prefix='best_', best_eval_loss=best_eval_loss)
-                wandb.log({'eval/best_eval_loss': best_eval_loss, 'eval/loss': eval_loss})
-                wandb.log({'train/loss': running_loss / (step + 1)})
+                wandb.log({'eval/best_eval_loss': best_eval_loss, 'eval/loss': eval_loss}, step=global_step)
+                wandb.log({'train/loss': running_loss / (step + 1), 'epoch': global_epoch}, step=global_step)
         if device == 0:
             pbar.set_description('epoch: {} Loss: {} eval loss: {} best_eval_loss: {}'.format(global_epoch, running_loss / (step + 1), eval_loss, best_eval_loss))
             pbar.update(1)
