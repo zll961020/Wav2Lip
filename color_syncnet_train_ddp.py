@@ -21,13 +21,8 @@ from torch.utils.data.distributed import DistributedSampler
 import torch.multiprocessing as mp
 from dotenv import load_dotenv
 load_dotenv()
-wandb_api_key = os.getenv('WANDB_API_KEY')
 import wandb
-wandb.login(key=wandb_api_key, host='http://10.10.185.1:8080')
 
-
-use_cuda = torch.cuda.is_available()
-print('use_cuda: {}'.format(use_cuda))
 
 # syncnet_T = 5
 # syncnet_mel_step_size = 16
@@ -149,6 +144,7 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
     
     resumed_step = start_epoch
     total_epochs = nepochs - start_epoch - 1
+    eval_loss = best_eval_loss 
     if device == 0:
         pbar = tqdm(total=total_epochs, desc='Training Progress')
     for global_epoch in range(start_epoch + 1, nepochs):
@@ -236,7 +232,7 @@ def save_checkpoint(model, optimizer, step, checkpoint_dir, epoch, prefix='', be
     print("Saved checkpoint:", checkpoint_path)
 
 def _load(checkpoint_path, device):
-    if use_cuda:
+    if device != 'cpu':
         checkpoint = torch.load(checkpoint_path, map_location='cuda:{}'.format(device))
     else:
         checkpoint = torch.load(checkpoint_path,
@@ -276,7 +272,9 @@ def main(rank: int, world_size: int, hparams:HParams):
     ddp_setup(rank, world_size)
    
     if rank == 0: 
-        
+         # 加载 wandb 配置并登录
+        wandb_api_key = os.getenv('WANDB_API_KEY')
+        wandb.login(key=wandb_api_key, host='http://10.10.185.1:8080')
         if hparams.checkpoint_path is not None:
             wandb.init(entity='lingz0124', project=hparams.project_name, id=hparams.wandb_id, resume="must")
         else:
