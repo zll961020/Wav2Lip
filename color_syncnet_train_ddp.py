@@ -279,6 +279,10 @@ def main(rank: int, world_size: int, hparams:HParams):
             wandb.init(entity='lingz0124', project=hparams.project_name, id=hparams.wandb_id, resume="must")
         else:
             wandb.init(project=hparams.project_name, config=hparams, name=hparams.model_name + '_' + hparams.experiment_id)
+         # 手动同步到 hparams 对象
+        for key in wandb.config.keys():
+            if hasattr(hparams, key):
+                setattr(hparams, key, wandb.config[key])
         hparams.set_hparam('wandb_id', wandb.run.id)
         if not os.path.exists(hparams.checkpoint_dir): os.mkdir(hparams.checkpoint_dir)
         # save yaml configuration file 
@@ -350,7 +354,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--checkpoint_dir', help='Save checkpoints to this directory', required=True, type=str)
     parser.add_argument('--checkpoint_path', help='Resumed from this checkpoint', default=None, type=str)
-    parser.add_argument('--config_file', help='config yaml file',default=None, type=str)
+    parser.add_argument('--config_file', help='config yaml file', default=None, type=str)
 
 
     args = parser.parse_args()

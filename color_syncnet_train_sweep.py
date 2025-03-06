@@ -68,7 +68,7 @@ else:
     master_process = True
     seed_offset = 0
     ddp_world_size = 1
-    device = hparams.device 
+    device = 'cuda:0' if use_cuda else 'cpu'
 
 torch.manual_seed(1337 + seed_offset)
 random.seed(1337 + seed_offset)
@@ -77,8 +77,10 @@ torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
 device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
 # note: float16 data type will automatically use a GradScaler
-ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[hparams.dtype]
-ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+ptdtype = torch.float32 #{'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[hparams.dtype]
+
+ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype) 
+
 
 
 
@@ -201,7 +203,7 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
             #print('Starting Epoch: {}'.format(global_epoch))
             running_loss = 0.
             #prog_bar = tqdm(enumerate(train_data_loader))
-            train_data_loader.sampler.set_epoch(global_epoch) 
+            #train_data_loader.sampler.set_epoch(global_epoch) 
             for step, (x, mel, y) in enumerate(train_data_loader):
                 model.train()
                 optimizer.zero_grad()
@@ -210,17 +212,18 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
                 x = x.to(device)
 
                 mel = mel.to(device)
+                y = y.to(device)
                 with ctx:
                     a, v = model(mel, x)
-                    y = y.to(device)
+                   
 
-                    loss = cosine_loss(a, v, y)
-                    loss.backward()
-                    optimizer.step()
+                loss = cosine_loss(a, v, y)
+                loss.backward()
+                optimizer.step()
 
-                    global_step += 1
-                    cur_session_steps = global_step - resumed_step
-                    running_loss += loss.item()
+                global_step += 1
+                cur_session_steps = global_step - resumed_step
+                running_loss += loss.item()
                 # only save best eval model, uncomment to save all
                 # if global_step == 1 or global_step % checkpoint_interval == 0:
                 #     save_checkpoint(
@@ -257,8 +260,8 @@ def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
             with ctx:
                 a, v = model(mel, x)
 
-                loss = cosine_loss(a, v, y)
-                losses.append(loss.item())
+            loss = cosine_loss(a, v, y)
+            losses.append(loss.item())
 
             if step > eval_steps: break
 
@@ -313,7 +316,7 @@ def update_hparams(hparams, args):
             hparams.set_hparam(key, value)
 
 @timing_decorator 
-def run(args):
+def run():
    
    
     # 初始化 wandb
@@ -322,7 +325,7 @@ def run(args):
         if args.config_file is not None:
             hparams.load_from_yaml(args.config_file) # override hyperparameters with config file
         update_hparams(hparams, vars(args))
-        wandb.init(project=hparams.project_name)
+        wandb.init(project=hparams.project_name, config=hparams.data)
     
         # 将sweep搜索的超参数更新到hparams
         config = wandb.config
@@ -387,7 +390,7 @@ def run(args):
     #     test_dataset, batch_size=hparams.syncnet_batch_size,
     #     num_workers=8)
 
-    device = torch.device(device if use_cuda else "cpu")
+    #device = torch.device(device if use_cuda else "cpu")
 
     # Model
     model = SyncNet().to(device)
@@ -399,11 +402,11 @@ def run(args):
     if checkpoint_path is not None:
         load_checkpoint(checkpoint_path, device, model, optimizer, reset_optimizer=False)
     
-    # compile the model
-    if hparams.compile:
-        print("compiling the model... (takes a ~minute)")
-        unoptimized_model = model
-        model = torch.compile(model) # requires PyTorch 2.0
+    # # compile the model
+    # if hparams.compile:
+    #     print("compiling the model... (takes a ~minute)")
+    #     unoptimized_model = model
+    #     model = torch.compile(model) # requires PyTorch 2.0
 
     # wrap model into DDP container
     if ddp:
@@ -416,34 +419,34 @@ def run(args):
 
     if ddp:
         destroy_process_group()
-# sweep_config = {    
-#     'method': 'bayes',
-#     'metric': {'name': 'eval/loss', 'goal': 'minimize'},
-#     'parameters': {
-#         'syncnet_lr': {
-#             'min': 0.00001,
-#             'max': 0.001,
-#             'distribution': 'log_uniform'
-#         },
-#         'syncnet_batch_size': {
-#             'values': [32, 64, 128]
-#         }
-#     },
-#     'early_terminate': {
-#         'type': 'hyperband',
-#         'min_iter': 3,
-#         'eta': 2
-#     }, 
-#     # 添加全局终止条件
-#     'stop': {
-#         'max_runs': 50,  # 最多运行50次试验
-#         'max_duration': "72h"  # 最长运行72小时
-#     }
-# }
-# sweep_id = wandb.sweep(sweep_config, project=hparams.project_name, entity='lingz0124')
+sweep_config = {    
+    'method': 'bayes',
+    'name': 'syncnet_sweep',
+    'metric': {'name': 'eval/loss', 'goal': 'minimize'},
+    'parameters': {
+        'syncnet_lr': {
+            'min': 0.00001,
+            'max': 0.001,
+            'distribution': 'log_uniform_values'
+        },
+        'syncnet_batch_size': {
+            'values': [32, 64, 128]
+        }
+    },
+    'early_terminate': {
+        'type': 'hyperband',
+        'min_iter': 3,
+        'eta': 2
+    }, 
+    # 添加全局终止条件
+    'stop': {
+        'max_runs': 50,  # 最多运行50次试验
+    }
+}
+sweep_id = wandb.sweep(sweep_config, project=hparams.project_name, entity='lingz0124')
 
-# wandb.agent(sweep_id, function=run, count=4)
+wandb.agent(sweep_id, function=run, count=5)
 
-if __name__ == "__main__":
+# if __name__ == "__main__":
 
-    run(args)
+#     run(args)
