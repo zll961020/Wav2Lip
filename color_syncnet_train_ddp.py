@@ -139,15 +139,15 @@ def cosine_loss(a, v, y):
 
 def train(device, model, train_data_loader, test_data_loader, optimizer,
           checkpoint_dir=None, checkpoint_interval=None, syncnet_eval_interval=None, 
-          nepochs=None, start_epoch=-1, global_step=0, best_eval_loss=1e3):
+          nepochs=None, start_epoch=0, global_step=0, best_eval_loss=1e3):
 
     
     resumed_step = start_epoch
-    total_epochs = nepochs - start_epoch - 1
+    total_epochs = nepochs - start_epoch
     eval_loss = best_eval_loss 
     if device == 0:
         pbar = tqdm(total=total_epochs, desc='Training Progress')
-    for global_epoch in range(start_epoch + 1, nepochs):
+    for global_epoch in range(start_epoch + 1, nepochs + 1):
         
         running_loss = 0.
         
@@ -333,7 +333,7 @@ def main(rank: int, world_size: int, hparams:HParams):
         model, global_step, global_epoch, best_eval_loss=load_checkpoint(hparams.checkpoint_path, model, optimizer, device, reset_optimizer=False)
     else:
         global_step = 0
-        global_epoch = -1
+        global_epoch = 0
         best_eval_loss = 1e3
     model = DDP(model, device_ids=[device])
     train(device, model, train_data_loader, test_data_loader, optimizer,
