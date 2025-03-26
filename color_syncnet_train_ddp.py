@@ -273,12 +273,12 @@ def main(rank: int, world_size: int, hparams:HParams):
    
     if rank == 0: 
          # 加载 wandb 配置并登录
-        wandb_api_key = os.getenv('WANDB_API_KEY')
-        wandb.login(key=wandb_api_key, host='http://10.10.185.1:8080')
+        wandb_api_key = os.getenv('WANDB_API_KEY_CLOUD')
+        wandb.login(key=wandb_api_key)
         if hparams.checkpoint_path is not None:
-            wandb.init(entity='lingz0124', project=hparams.project_name, id=hparams.wandb_id, resume="must")
+            wandb.init(entity='zll007', project=hparams.project_name, id=hparams.wandb_id, resume="must", mode='offline')
         else:
-            wandb.init(project=hparams.project_name, config=hparams, name=hparams.model_name + '_' + hparams.experiment_id)
+            wandb.init(entity='zll007', project=hparams.project_name, config=hparams, name=hparams.model_name + '_' + hparams.experiment_id, mode='offline')
          # 手动同步到 hparams 对象
         for key in wandb.config.keys():
             if hasattr(hparams, key):
@@ -292,7 +292,7 @@ def main(rank: int, world_size: int, hparams:HParams):
         hparams_list = [hparams]
     else:
         hparams_list = [None]
-    torch.distributed.broadcast_object_list(hparams_list, src=0)
+    torch.distributed.broadcast_object_list(hparams_list, src=0) # 所有进程会被src进程的hparams_list覆盖
     hparams = hparams_list[0]
 
     # Dataset and Dataloader setup
