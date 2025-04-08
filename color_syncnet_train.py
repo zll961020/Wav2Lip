@@ -18,9 +18,9 @@ from hparams import hparams, get_image_list
 from tools.utils import timing_decorator
 from dotenv import load_dotenv
 load_dotenv()
-wandb_api_key = os.getenv('WANDB_API_KEY')
+wandb_api_key = os.getenv('WANDB_API_KEY_CLOUD')
 import wandb
-wandb.login(key=wandb_api_key, host='http://10.10.185.1:8080')
+wandb.login(key=wandb_api_key)
 parser = argparse.ArgumentParser(description='Code to train the expert lip-sync discriminator')
 
 parser.add_argument("--data_root", help="Root folder of the preprocessed LRS2 dataset", required=True)
@@ -35,9 +35,9 @@ if args.config_file is not None:
     hparams.load_from_yaml(args.config_file) # override hyperparameters with config file
 
 if args.checkpoint_path is not None:
-    wandb.init(entity='lingz0124', project=hparams.project_name, id=hparams.run_id, resume="must")
+    wandb.init(entity='zll007', project=hparams.project_name, id=hparams.run_id, mode='offline', resume="must")
 else:
-    wandb.init(project=hparams.project_name, config=hparams, name=hparams.model_name + '_' + hparams.experiment_id)
+    wandb.init(entity='zll007', project=hparams.project_name, config=hparams, name=hparams.model_name + '_' + hparams.experiment_id, mode='offline')
 run_id = wandb.run.id
 hparams.set_hparam('run_id', run_id) 
 global_step = 0
@@ -162,8 +162,8 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
     while global_epoch < nepochs:
         print('Starting Epoch: {}'.format(global_epoch))
         running_loss = 0.
-        prog_bar = tqdm(enumerate(train_data_loader))
-        for step, (x, mel, y) in prog_bar:
+        #prog_bar = tqdm(enumerate(train_data_loader))
+        for step, (x, mel, y) in enumerate(train_data_loader):
             model.train()
             optimizer.zero_grad()
 
@@ -196,8 +196,8 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
                             model, optimizer, global_step, checkpoint_dir, global_epoch, prefix='best_')
             wandb.log({'train/best_eval_loss': best_eval_loss}, step=global_step)
             wandb.log({'train/loss': running_loss / (step + 1), 'epoch': global_epoch}, step=global_step)
-            prog_bar.set_description('Loss: {}'.format(running_loss / (step + 1)))
-
+            #prog_bar.set_description('Loss: {}'.format(running_loss / (step + 1)))
+        print(f'global_epoch: {global_epoch} global_step: {global_step} best_eval_loss: {best_eval_loss} loss: {running_loss / (step + 1)}')
         global_epoch += 1
 
 def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
@@ -284,7 +284,8 @@ if __name__ == "__main__":
     test_data_loader = data_utils.DataLoader(
         test_dataset, batch_size=hparams.syncnet_batch_size,
         num_workers=8)
-
+    print(f"train_data_loader: {len(train_data_loader)} train_dataset: {len(train_dataset)}")
+    print(f"test_data_loader: {len(test_data_loader)} test_dataset: {len(test_dataset)}")   
     device = torch.device("cuda" if use_cuda else "cpu")
 
     # Model
