@@ -13,7 +13,7 @@ import numpy as np
 
 from glob import glob
 
-import os, random, cv2, argparse
+import os, random, cv2, argparse, time 
 from hparams import hparams, get_image_list
 from tools.utils import timing_decorator
 from dotenv import load_dotenv
@@ -160,7 +160,8 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
     resumed_step = global_step
     
     while global_epoch < nepochs:
-        print('Starting Epoch: {}'.format(global_epoch))
+        #print('Starting Epoch: {}'.format(global_epoch))
+        start_time = time.time()
         running_loss = 0.
         #prog_bar = tqdm(enumerate(train_data_loader))
         for step, (x, mel, y) in enumerate(train_data_loader):
@@ -197,7 +198,8 @@ def train(device, model, train_data_loader, test_data_loader, optimizer,
             wandb.log({'train/best_eval_loss': best_eval_loss}, step=global_step)
             wandb.log({'train/loss': running_loss / (step + 1), 'epoch': global_epoch}, step=global_step)
             #prog_bar.set_description('Loss: {}'.format(running_loss / (step + 1)))
-        print(f'global_epoch: {global_epoch} global_step: {global_step} best_eval_loss: {best_eval_loss} loss: {running_loss / (step + 1)}')
+        end_time = time.time() 
+        print(f'global_epoch: {global_epoch} global_step: {global_step} best_eval_loss: {best_eval_loss} loss: {running_loss / (step + 1)} time: {end_time - start_time}')
         global_epoch += 1
 
 def eval_model(test_data_loader, global_step, device, model, checkpoint_dir):
